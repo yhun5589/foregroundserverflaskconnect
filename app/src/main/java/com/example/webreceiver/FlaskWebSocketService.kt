@@ -16,34 +16,35 @@ class FlaskWebSocketService : Service() {
     companion object {
         const val NOTIF_ID = 1001
         const val ACTION_STOP_SOUND = "com.example.webreceiver.action.STOP_SOUND"
-        const val ACTION_STOP_SERVICE = "com.example.webreceiver.action.STOP_SERVICE"
         const val REQUEST_STOP_SOUND = 2001
-        const val REQUEST_STOP_SERVICE = 2002
         val messageLiveData = MutableLiveData<String>()
     }
 
     private val client = OkHttpClient()
     private var webSocket: WebSocket? = null
     private var player: MediaPlayer? = null
+    private var currentWsUrl: String? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP_SOUND -> {
-                stopAlarm()
-                updateMainNotification("Sound stopped. Still connected.")
-                return START_STICKY
-            }
-            ACTION_STOP_SERVICE -> {
-                stopAlarm()
-                webSocket?.close(1000, "Stopped by user")
-                stopForeground(true)
-                stopSelf()
-                return START_NOT_STICKY
+
+        // Handle Stop Sound action
+        if (intent?.action == ACTION_STOP_SOUND) {
+            stopAlarm()
+            updateMainNotification("Sound stopped. Still connected.")
+            return START_STICKY
+        }
+
+        // Read URL from intent
+        val wsUrl = intent?.getStringExtra("url") ?: currentWsUrl
+        wsUrl?.let {
+            if (it != currentWsUrl) {
+                // Only reconnect if URL changed
+                currentWsUrl = it
+                connectToFlask(it)
             }
         }
 
         startAsForeground()
-        connectToFlask()
         return START_STICKY
     }
 
@@ -51,22 +52,24 @@ class FlaskWebSocketService : Service() {
         val channelId = "flask_channel"
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            nm.getNotificationChannel(channelId) == null) {
+            nm.getNotificationChannel(channelId) == null
+        ) {
             nm.createNotificationChannel(
                 NotificationChannel(
                     channelId,
                     "Flask WebSocket Channel",
-                    NotificationManager.IMPORTANCE_HIGH
+                    NotificationManager.IMPORTANCE_LOW
                 )
             )
         }
 
-        // PendingIntent to stop only sound
         val stopSoundIntent = Intent(this, FlaskWebSocketService::class.java).apply {
             action = ACTION_STOP_SOUND
         }
-        val stopSoundPending = PendingIntent.getService(
-            this, REQUEST_STOP_SOUND, stopSoundIntent,
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            REQUEST_STOP_SOUND,
+            stopSoundIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -74,26 +77,21 @@ class FlaskWebSocketService : Service() {
             .setContentTitle("Connected to Flask")
             .setContentText("Receiving data stream...")
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            .addAction(android.R.drawable.ic_media_pause, "Stop Sound", stopSoundPending)
+            .addAction(android.R.drawable.ic_media_pause, "Stop Sound", stopPendingIntent)
             .setOngoing(true)
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            startForeground(
-                NOTIF_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
+            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
             startForeground(NOTIF_ID, notification)
         }
     }
 
-    private fun connectToFlask() {
-        val request = Request.Builder()
-            .url("ws://192.168.1.100:5000/ws")
-            .build()
+    private fun connectToFlask(url: String) {
+        webSocket?.close(1000, "Reconnecting")
 
+        val request = Request.Builder().url(url).build()
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 messageLiveData.postValue("Connected!")
@@ -101,10 +99,7 @@ class FlaskWebSocketService : Service() {
 
             override fun onMessage(ws: WebSocket, text: String) {
                 messageLiveData.postValue("From Flask: $text")
-                if (text == "20") {
-                    playAlarm()
-                    showAlarmNotification()
-                }
+                if (text == "FALLDETECTED") playAlarm()
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
@@ -131,39 +126,6 @@ class FlaskWebSocketService : Service() {
         player?.stop()
         player?.release()
         player = null
-    }
-
-    private fun showAlarmNotification() {
-        val channelId = "alarm_channel"
-        val nm = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            nm.getNotificationChannel(channelId) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(
-                    channelId,
-                    "Alarm Channel",
-                    NotificationManager.IMPORTANCE_HIGH
-                )
-            )
-        }
-
-        val stopSoundIntent = Intent(this, FlaskWebSocketService::class.java).apply {
-            action = ACTION_STOP_SOUND
-        }
-        val stopSoundPending = PendingIntent.getService(
-            this, REQUEST_STOP_SOUND, stopSoundIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notif = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("⚠️ Alert Triggered")
-            .setContentText("Tap Stop to silence the alarm")
-            .setSmallIcon(android.R.drawable.stat_notify_error)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .addAction(android.R.drawable.ic_media_pause, "Stop Sound", stopSoundPending)
-            .build()
-
-        nm.notify(2002, notif)
     }
 
     private fun updateMainNotification(text: String) {
